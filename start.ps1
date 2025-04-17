@@ -5,14 +5,14 @@ param(
 )
 
 # Set variables
-$PYTHON = "python3"
-$PIP = "pip3"
-$VIRTUALENV = "virtualenv"
+$PYTHON = "python"
+$PIP = "pip"
 $VIRTUAL_ENV_DIR = ".virtualenvs/carr_script"
-$USE_VENV = $false
+$USE_VENV = $true
 $INTERNET_ACCESS = $false
-$USE_OFFLINE = $true
 $CARR_LEAD_DAYS = $t
+$whl = Get-ChildItem -Path carr-*.whl | Select-Object -First 1
+Write-Host "Found Carr wheel file: $($whl.FullName)"
 
 function Print-Usage {
     Write-Host "Usage: .\carr_script.ps1 [-o] [-t days]"
@@ -32,47 +32,66 @@ function Check-LeadDays($days) {
 function Check-InternetAccess {
     Write-Host "Checking Internet access ..."
     try {
-        $response = Invoke-WebRequest -Uri "https://www.pypi.org" -UseBasicParsing -TimeoutSec 5
-        if ($response.StatusCode -eq 200) {
-            $GLOBALS:INTERNET_ACCESS = $true
+        $pingResult = Test-Connection -ComputerName "www.pypi.org" -Count 1 -Quiet
+        $script:INTERNET_ACCESS = $pingResult
+        if ($INTERNET_ACCESS) {
+            Write-Host "Internet access is available."
+            $script:USE_OFFLINE = $false
+        } else {
+            Write-Host "Internet access is not available. Switching to offline mode."
+            $script:USE_OFFLINE = $true
         }
     } catch {
-        $GLOBALS:INTERNET_ACCESS = $false
+        Write-Host "Error checking internet access. Assuming offline mode."
+        $script:INTERNET_ACCESS = $false
+        $script:USE_OFFLINE = $true
     }
-    Write-Host "Internet access is $INTERNET_ACCESS"
 }
 
 function Install-Pip3 {
     Write-Host "Installing $PIP ..."
-    # Try ensurepip first
     try {
+        # Use ensurepip to bootstrap pip
         & $PYTHON -m ensurepip --upgrade
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "$PIP installed successfully using ensurepip"
-            return
+            Write-Host "$PIP installed successfully using ensurepip."
+        } else {
+            Write-Host "Failed to install pip using ensurepip."
+            exit 1
         }
     } catch {
-        Write-Host "ensurepip not available, trying get-pip.py"
+        Write-Host "Failed to install pip using ensurepip."
+        exit 1
     }
-    # Fallback to get-pip.py if available
-    if (Test-Path "./get-pip.py") {
-        & $PYTHON ./get-pip.py pip==24.2 --no-setuptools --no-wheel --no-index --find-links=./wheels
+
+    # Upgrade pip to the desired version
+    try {
+        Write-Host "Upgrading $PIP to version 24.2 ..."
+        & $PYTHON -m pip install --upgrade pip==24.2
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "$PIP installed successfully using get-pip.py"
-            return
+            Write-Host "$PIP upgraded to version 24.2 successfully."
+        } else {
+            Write-Host "Failed to upgrade pip to version 24.2."
+            exit 1
         }
+    } catch {
+        Write-Host "Failed to upgrade pip to version 24.2. Please check your internet connection or Python setup."
+        exit 1
     }
-    Write-Host "$PIP installation failed."
-    exit 1
 }
 
 function Install-Virtualenv {
     Write-Host "Installing virtualenv ..."
-    & $PIP install --root-user-action=ignore --no-index --find-links=./wheels ./wheels/virtualenv-*-py3-none-any.whl
+    if (-not $whl) {
+        Write-Host "Error: virtualenv wheel file not found in the wheels directory."
+        Write-Host "Ensure that the 'wheels' directory contains the required .whl file."
+        exit 1
+    }
+    & $PIP install --root-user-action=ignore --no-index --find-links=wheels $whl.FullName
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "$VIRTUALENV installed successfully"
+        Write-Host "Virtualenv installed successfully"
     } else {
-        Write-Host "$VIRTUALENV installation failed."
+        Write-Host "Virtualenv installation failed."
         exit 1
     }
 }
@@ -126,7 +145,6 @@ function Check-InstallVirtualenv {
     }
     if ($venvInstalled -and $ensurepipInstalled) {
         Write-Host "venv and ensurepip are installed"
-        $GLOBALS:USE_VENV = $true
         return
     }
     try {
@@ -170,22 +188,37 @@ function Create-VirtualEnv {
 }
 
 function Activate-VirtualEnv {
-    $activateScript = Join-Path $VIRTUAL_ENV_DIR "bin/activate"
+    $activateScript = Join-Path $VIRTUAL_ENV_DIR "Scripts/activate"
     if (-not (Test-Path $activateScript)) {
-        Write-Host "Failed to activate virtualenv"
+        Write-Host "Failed to activate virtualenv. Activation script not found."
         exit 1
     }
+    Write-Host "Activating virtual environment..."
     & $activateScript
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Virtual environment activated."
     } else {
-        Write-Host "Failed to activate virtualenv"
+        Write-Host "Failed to activate virtualenv."
         exit 1
     }
 }
-
+function Ensure-Pip-In-VirtualEnv {
+    $venvPip = Join-Path $VIRTUAL_ENV_DIR "Scripts/pip"
+    if (-not (Test-Path $venvPip)) {
+        Write-Host "pip is not available in the virtual environment. Installing pip..."
+        & $PYTHON -m ensurepip --upgrade
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "pip installed successfully in the virtual environment."
+        } else {
+            Write-Host "Failed to install pip in the virtual environment."
+            exit 1
+        }
+    } else {
+        Write-Host "pip is already available in the virtual environment."
+    }
+}
 function Carr-Installed {
-    $carrPath = Join-Path $VIRTUAL_ENV_DIR "bin/carr"
+    $carrPath = Join-Path $VIRTUAL_ENV_DIR "Scripts/carr"
     if (Test-Path $carrPath) {
         Write-Host "Carr package is already installed."
         return $true
@@ -197,15 +230,24 @@ function Install-CarrWhl {
     if (Carr-Installed) {
         return
     }
-    if ($INTERNET_ACCESS) {
-        & $PIP install ./carr-*-py3-none-any.whl
-    } else {
-        & $PIP install --no-index --find-links ./wheels/ ./carr-*-py3-none-any.whl
+    if (-not $whl) {
+        Write-Host "Error: Carr wheel file not found in the wheels directory."
+        Write-Host "Ensure that the 'wheels' directory contains the required .whl file."
+        exit 1
     }
+
+    if ($INTERNET_ACCESS) {
+        Write-Host "Installing Carr package online..."
+        & pip install $whl.FullName
+    } else {
+        Write-Host "Installing Carr package offline..."
+        & pip install --no-index --find-links wheels/ $whl.FullName
+    }
+
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Carr package installed successfully."
     } else {
-        Write-Host "Failed to install carr package"
+        Write-Host "Failed to install Carr package."
         exit 1
     }
 }
@@ -222,22 +264,26 @@ Check-LeadDays $t
 $env:CARR_LEAD_DAYS = $t
 
 # Main script logic
-if (-not $USE_OFFLINE) {
-    Check-InternetAccess
-} else {
-    Write-Host "Script is running in offline mode"
-}
+Check-InternetAccess
 
+if ($USE_OFFLINE) {
+    Write-Host "Script is running in offline mode"
+} else {
+    Write-Host "Script is running in online mode"
+}
 Check-PythonVersion
 Check-InstallPip
 Check-InstallVirtualenv
 Create-VirtualEnv
 
-# Activate virtual environment (PowerShell: just run scripts in venv/bin)
-# You may need to adjust this for your shell/environment
-# For most scripts, you can just use the full path to the binary
+# Activate the virtual environment
+Activate-VirtualEnv
 
+# Ensure pip is available in the virtual environment
+Ensure-Pip-In-VirtualEnv
+
+# Install the Carr package in the virtual environment
 Install-CarrWhl
 
-# Run carr script
-& "$VIRTUAL_ENV_DIR/bin/carr"
+# Run the Carr script from the virtual environment
+& "$VIRTUAL_ENV_DIR/Scripts/carr"
