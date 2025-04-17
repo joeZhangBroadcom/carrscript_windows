@@ -241,7 +241,9 @@ function Install-CarrWhl {
         & pip install $whl.FullName
     } else {
         Write-Host "Installing Carr package offline..."
-        & pip install --no-index --find-links wheels/ $whl.FullName
+        ##pip download --platform win_amd64 --only-binary=:all: --dest=wheels carr==$whl.FullName
+        ##Use above command to download the wheel file if needed then repack. 
+        & pip install --no-index --find-links wheels $whl.FullName
     }
 
     if ($LASTEXITCODE -eq 0) {
